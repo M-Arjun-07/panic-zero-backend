@@ -8,7 +8,7 @@ from typing import List, Optional
 from datetime import datetime
 import uuid
 
-from database import db, redis_client
+from database import db, redis_client, init_db
 from models import Staff
 from rule_engine import assign_staff_to_crisis
 from triage import run_triage
@@ -17,7 +17,8 @@ from guardian_mesh import fuse_from_crisis, fuse_signals, record_alert_event
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Firebase is initialized automatically in database.py
+    # Firebase is initialized gracefully on startup
+    init_db()
     # No SQL tables to create!
     yield
     # Cleanup on shutdown
