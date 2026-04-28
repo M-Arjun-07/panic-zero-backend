@@ -1,0 +1,294 @@
+================================================================================
+  PANICZERO — FULL DEPENDENCY REFERENCE
+  Written: 2026-04-27
+  Covers:  backend/  |  yolo-model/  |  audio-model/
+================================================================================
+
+  This file lists every pip package that must be installed, every Python
+  stdlib module that is used (no install needed), and every internal
+  project module, grouped by sub-project.
+
+  HOW TO INSTALL EVERYTHING IN ONE SHOT
+  ──────────────────────────────────────
+  Run these three commands from the project ROOT folder:
+
+    pip install -r backend/requirements.txt
+    pip install -r yolo-model/requirements.txt
+    pip install -r audio-model/requirements.txt
+
+  Or install all at once (creates duplicates but is harmless):
+
+    pip install fastapi uvicorn pydantic websockets fakeredis firebase-admin httpx ^
+                ultralytics opencv-python requests ^
+                tensorflow sounddevice numpy scipy openai-whisper
+
+  Python version requirement: 3.10 or higher (uses match/case syntax style
+  and modern typing hints like X | Y).
+
+
+================================================================================
+  SECTION 1 — BACKEND  (backend/)
+================================================================================
+
+  Entry point : backend/main.py
+  Run command : python main.py   OR   uvicorn main:app --reload
+
+  ── 1A. THIRD-PARTY PACKAGES (pip install required) ─────────────────────────
+
+  Package            pip install name       Used in file(s)          Why needed
+  ─────────────────  ─────────────────────  ───────────────────────  ─────────────────────────────────────
+  fastapi            fastapi                main.py                  Web framework, all HTTP endpoints
+  uvicorn            uvicorn                main.py                  ASGI server to run FastAPI
+  pydantic           pydantic               main.py, models.py       Request/response data validation
+  websockets         websockets             main.py                  WebSocket support for dashboard
+  httpx              httpx                  main.py, rule_engine.py  Async HTTP client (FCM push calls)
+  firebase-admin     firebase-admin         database.py              Firestore (staff + crisis storage)
+  fakeredis          fakeredis[aioredis]    database.py              In-memory Redis substitute (dev)
+
+  Install command:
+    pip install fastapi uvicorn pydantic websockets httpx firebase-admin "fakeredis[aioredis]"
+
+  ── 1B. PYTHON STANDARD LIBRARY (built-in, no install needed) ───────────────
+
+  Module             Used in file(s)          Notes
+  ─────────────────  ───────────────────────  ───────────────────────────────────────
+  json               main.py                  Serialize/deserialize Redis crisis data
+  os                 rule_engine.py           Read PANIC_FCM_SERVER_KEY env variable
+                     database.py              Read Firebase credentials path
+  math               rule_engine.py           Haversine distance formula
+                     guardian_mesh.py         (imported, available for future use)
+  time               guardian_mesh.py         Network-signal sliding window timestamps
+  uuid               main.py                  Generate unique crisis IDs (CRIS-XXXXXX)
+  datetime           main.py                  ISO-8601 timestamps on crisis records
+                     rule_engine.py           Mark staff assignment time
+                     guardian_mesh.py         Fusion result timestamp
+  random             triage.py                Deterministic mock traffic delay seed
+  heapq              pathfinding.py           A* priority queue (min-heap)
+  collections.deque  guardian_mesh.py         Ring buffer for alert-frequency scoring
+  typing             main.py                  List, Optional type hints
+                     pathfinding.py           Optional type hint
+                     models.py                Optional type hint
+                     guardian_mesh.py         Optional type hint
+  contextlib         main.py                  asynccontextmanager (lifespan handler)
+
+  ── 1C. INTERNAL PROJECT MODULES (no install, just keep files together) ──────
+
+  Module             File                     Exported symbols used
+  ─────────────────  ───────────────────────  ─────────────────────────────────────────
+  database           database.py              db (Firestore client), redis_client
+  models             models.py                Staff (Pydantic schema)
+  rule_engine        rule_engine.py           assign_staff_to_crisis()
+  triage             triage.py                run_triage()
+  pathfinding        pathfinding.py           get_evacuation_route()
+  guardian_mesh      guardian_mesh.py         fuse_from_crisis(), fuse_signals(),
+                                              record_alert_event()
+
+  ── 1D. EXTERNAL SERVICES / FILES REQUIRED ───────────────────────────────────
+
+  File / Service                    Where configured        Notes
+  ────────────────────────────────  ──────────────────────  ──────────────────────────────────
+  firebase-credentials.json         database.py line 8      Download from Firebase Console →
+                                                            Project Settings → Service Accounts
+                                                            → Generate new private key
+  PANIC_FCM_SERVER_KEY (env var)    rule_engine.py line 13  Optional. From Firebase Console →
+                                                            Project Settings → Cloud Messaging
+                                                            → Server key. Without it the engine
+                                                            runs in mock-log mode (still works).
+
+
+================================================================================
+  SECTION 2 — YOLO CAMERA MODEL  (yolo-model/)
+================================================================================
+
+  Entry point : yolo-model/detector.py
+  Run command : python detector.py
+
+  ── 2A. THIRD-PARTY PACKAGES (pip install required) ─────────────────────────
+
+  Package            pip install name        Used in file(s)          Why needed
+  ─────────────────  ──────────────────────  ───────────────────────  ────────────────────────────────────
+  ultralytics        ultralytics             detector.py              YOLOv8 model loading + inference
+  opencv-python      opencv-python           detector.py              Camera capture, frame drawing, UI
+  numpy              numpy                   detector.py              Array ops on frame data
+  requests           requests                detector.py              POST alerts to FastAPI backend
+
+  Install command:
+    pip install ultralytics opencv-python numpy requests
+
+  Model file required:
+    yolov8n.pt  — YOLOv8 nano weights file.
+    Already present at: yolo-model/yolov8n.pt  (also at project root)
+    If missing, ultralytics auto-downloads it on first run.
+
+  ── 2B. PYTHON STANDARD LIBRARY ──────────────────────────────────────────────
+
+  Module             Notes
+  ─────────────────  ────────────────────────────────────────────
+  time               Alert cooldown tracking
+  json               (imported, available)
+  threading          Non-blocking alert dispatch (daemon threads)
+
+  ── 2C. INTERNAL CONFIG MODULE ───────────────────────────────────────────────
+
+  Module             File                     Key settings
+  ─────────────────  ───────────────────────  ──────────────────────────────────────────
+  config             yolo-model/config.py     API_ENDPOINT, CAMERA_NAME, ALERT_COOLDOWN,
+                                              FALLEN_PERSON_RATIO, CROWD_SURGE_THRESHOLD
+
+
+================================================================================
+  SECTION 3 — AUDIO MODEL  (audio-model/)
+================================================================================
+
+  Entry point : audio-model/audio_detector.py
+  Run command : python audio_detector.py --source mic
+                python audio_detector.py --source path/to/file.wav
+
+  ── 3A. THIRD-PARTY PACKAGES (pip install required) ─────────────────────────
+
+  Package            pip install name        Used in file(s)          Why needed
+  ─────────────────  ──────────────────────  ───────────────────────  ─────────────────────────────────────
+  tensorflow         tensorflow>=2.10.0      audio_detector.py        Run YAMNet TFLite model inference
+  sounddevice        sounddevice>=0.4.6      audio_detector.py        Capture live microphone audio stream
+  numpy              numpy>=1.23.0           audio_detector.py        Waveform array manipulation
+  scipy              scipy>=1.9.0            audio_detector.py        Read .wav files (scipy.io.wavfile)
+  requests           requests>=2.28.0        audio_detector.py        POST alerts to FastAPI backend
+  openai-whisper     openai-whisper          audio_detector.py        Speech-to-text for phrase detection
+                     (NOT whisper-jax —                               NOTE: install with:
+                      use openai-whisper)                               pip install openai-whisper
+
+  Install command:
+    pip install tensorflow sounddevice "numpy>=1.23.0" scipy requests openai-whisper
+
+  NOTE on Whisper: The requirements.txt says "whisper-jax" but the code does
+  "import whisper" which maps to the openai-whisper package. Use:
+    pip install openai-whisper
+  (not whisper-jax, which has a different API)
+
+  Model files required (auto-downloaded on first run if missing):
+    audio-model/yamnet.tflite         — YAMNet TFLite audio classification model
+    audio-model/yamnet_class_map.csv  — 521 class labels for YAMNet output
+    Whisper "tiny" model              — Downloaded automatically by openai-whisper
+                                        on first call to whisper.load_model("tiny")
+
+  ── 3B. PYTHON STANDARD LIBRARY ──────────────────────────────────────────────
+
+  Module             Notes
+  ─────────────────  ────────────────────────────────────────────────────────
+  os                 Path construction for model files
+  time               Alert cooldown tracking
+  argparse           CLI argument parsing (--source mic / file path)
+  urllib.request     Download yamnet.tflite + class map if missing
+  csv                Parse yamnet_class_map.csv into class name list
+  json               (imported, available)
+  queue              Thread-safe audio chunk queue for mic stream
+  sys                Exit on missing dependencies
+
+  ── 3C. INTERNAL CONFIG MODULE ───────────────────────────────────────────────
+
+  Module             File                      Key settings
+  ─────────────────  ────────────────────────  ──────────────────────────────────────────
+  config             audio-model/config.py     API_ENDPOINT, COOLDOWN_SECONDS,
+                                               CONFIDENCE_THRESHOLD, THREAT_KEYWORDS,
+                                               SENSOR_ROOM_ID, DEFAULT_ROUTE
+
+
+================================================================================
+  SECTION 4 — GUARDIAN MESH  (backend/guardian_mesh.py)
+================================================================================
+
+  NO external pip packages required.
+  Guardian Mesh is pure Python — it uses only stdlib modules.
+
+  ── 4A. PYTHON STANDARD LIBRARY ONLY ─────────────────────────────────────────
+
+  Module                  Notes
+  ──────────────────────  ──────────────────────────────────────────────────────
+  time                    Timestamps for the alert-frequency sliding window
+  math                    Available for distance calculations (not active yet)
+  collections.deque       Ring buffer storing last N alert timestamps
+  datetime                ISO-8601 UTC timestamp in every fusion result
+  typing.Optional         Type hint for nullable payload parameters
+
+  Called by:
+    main.py               → fuse_from_crisis(), fuse_signals(), record_alert_event()
+    yolo-model/detector   → POST /api/guardian/fuse  (HTTP, not direct import)
+    audio-model/detector  → POST /api/guardian/fuse  (HTTP, not direct import)
+
+
+================================================================================
+  SECTION 5 — QUICK INSTALL CHEATSHEET
+================================================================================
+
+  Run from the PROJECT ROOT in this exact order:
+
+  STEP 1 — Backend
+  ─────────────────
+    cd backend
+    pip install fastapi uvicorn pydantic websockets httpx firebase-admin "fakeredis[aioredis]"
+
+  STEP 2 — YOLO Camera Model
+  ──────────────────────────
+    cd ../yolo-model
+    pip install ultralytics opencv-python numpy requests
+
+  STEP 3 — Audio Model
+  ──────────────────────
+    cd ../audio-model
+    pip install tensorflow sounddevice "numpy>=1.23.0" scipy requests openai-whisper
+
+  STEP 4 — Verify backend starts
+  ────────────────────────────────
+    cd ../backend
+    python main.py
+    → Open http://127.0.0.1:8000/docs to confirm all endpoints appear
+
+  STEP 5 — Place your Firebase credentials file
+  ──────────────────────────────────────────────
+    Copy firebase-credentials.json into backend/
+    (If it's already there, you're good.)
+
+  ── VIRTUAL ENVIRONMENT (recommended) ────────────────────────────────────────
+
+    python -m venv venv
+    venv\Scripts\activate          # Windows
+    source venv/bin/activate       # macOS / Linux
+    pip install <packages above>
+
+
+================================================================================
+  SECTION 6 — COMMON ERRORS & FIXES
+================================================================================
+
+  ERROR: "No module named 'whisper'"
+  FIX:   pip install openai-whisper   (NOT whisper, NOT whisper-jax)
+
+  ERROR: "No module named 'cv2'"
+  FIX:   pip install opencv-python
+
+  ERROR: "No module named 'ultralytics'"
+  FIX:   pip install ultralytics
+
+  ERROR: "No module named 'firebase_admin'"
+  FIX:   pip install firebase-admin
+         AND ensure backend/firebase-credentials.json exists
+
+  ERROR: "No module named 'fakeredis'"
+  FIX:   pip install "fakeredis[aioredis]"   (include the [aioredis] extra)
+
+  ERROR: "No module named 'sounddevice'"
+  FIX:   pip install sounddevice
+         On Windows you may also need: pip install sounddevice pyaudio
+
+  ERROR: "ModuleNotFoundError: No module named 'tensorflow'"
+  FIX:   pip install tensorflow
+         Note: tensorflow requires Python 3.8–3.11. Does NOT support 3.12+ yet.
+         If on Python 3.12, use: pip install tensorflow-cpu
+
+  ERROR: "DefaultCredentialsError" from Firebase
+  FIX:   Make sure backend/firebase-credentials.json is present and valid.
+         Download it from Firebase Console → Project Settings → Service Accounts.
+
+================================================================================
+  END OF DEPENDENCY REFERENCE
+================================================================================

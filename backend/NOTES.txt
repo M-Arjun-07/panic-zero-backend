@@ -1,0 +1,455 @@
+================================================================================
+  PANICZERO BACKEND — HANDOFF & STATUS NOTES
+  Written: 2026-04-27
+  Author:  Backend Dev (Rule Engine / Triage / Pathfinding)
+================================================================================
+
+This file explains:
+  1. What has been built and is working RIGHT NOW
+  2. How each piece connects to the others
+  3. What is still mocked / waiting on other team members
+  4. How to run everything
+  5. What each team member needs to know
+
+================================================================================
+  SECTION 1 — HOW TO RUN THE BACKEND
+================================================================================
+
+  Option A — Run locally (recommended for development):
+  ─────────────────────────────────────────────────────
+    cd backend
+    python main.py
+
+    Server starts at: http://127.0.0.1:8000
+    Interactive API docs: http://127.0.0.1:8000/docs
+    (The /docs page lets anyone test any endpoint without writing code)
+
+  Option B — Run with Docker:
+  ────────────────────────────
+    From the project ROOT folder (not backend/):
+      docker-compose up --build
+
+    This starts both the backend (port 8000) AND the frontend (port 5173).
+
+  To enable REAL push notifications (once Person 4 gives the FCM key):
+    On Windows PowerShell:
+      $env:PANIC_FCM_SERVER_KEY = "the-key-person-4-gives-you"
+      python main.py
+
+    With Docker:
+      PANIC_FCM_SERVER_KEY=the-key docker-compose up
+
+
+================================================================================
+  SECTION 2 — WHAT HAS BEEN BUILT (ALL DONE & TESTED)
+================================================================================
+
+  FILE: main.py
+  ─────────────
+  The main FastAPI server. Contains all HTTP endpoints and the WebSocket.
+  When a crisis comes in, it automatically:
+    1. Saves it to Firebase Firestore + Redis
+    2. Calls the Rule Engine → assigns staff
+    3. Calls the Triage Engine → picks best hospital (if severity >= 3)
+    4. Broadcasts to all connected dashboards via WebSocket
+    5. Returns everything in the API response
+
+  FILE: rule_engine.py  ← DELIVERABLE 3
+  ───────────────────────────────────────
+  The "who responds" brain.
+
+  What it does:
+    - Reads the crisis description and matches it to a THREAT MATRIX
+      (Fire → Security + Fire Warden, Medical → Nurse/Doctor, Violence → Security)
+    - Figures out how many people are needed based on severity (1-5 scale)
+    - Queries Firebase for all staff with status = "Available"
+    - Filters them by role and medical training level
+    - Scores them:
+        * Same zone as the crisis = -100 points (massive priority)
+        * GPS distance (Haversine formula) = added to score
+        * More experience = slight bonus
+    - Picks the best team (lowest score = closest, most qualified)
+    - Sends FCM push notification to each team member's phone
+    - Marks them as "Busy" in Firebase so they don't get double-assigned
+    - If severity crosses the threshold → triggers escalation (fire dept, ambulance, police)
+
+  Threat types it recognises:
+    FIRE        → keywords: fire, smoke, flame, blaze
+    MEDICAL     → keywords: medical, fall, unconscious, help, chest pain, seizure
+    VIOLENCE    → keywords: weapon, knife, gun, fight, assault
+    CROWD       → keywords: crowd, panic, stampede, evacuation
+    GENERAL     → anything else (fallback)
+
+  FILE: triage.py  ← DELIVERABLE 4
+  ──────────────────────────────────
+  The "which hospital" brain (like Swiggy/Zomato but for hospitals).
+
+  What it does:
+    - Has a mock database of 5 hospitals with beds, specialists, GPS coords
+    - For each hospital, calculates a SCORE based on:
+        * Distance from the incident (Haversine, km)        → lower = better
+        * Traffic delay (mock — based on distance + congestion) → lower = better
+        * Bed availability (0 beds = DISQUALIFIED, +999 score)
+        * Specialist match (right doctor for the crisis type = -50 per match)
+        * Trauma center bonus for violent/fire incidents = -30
+    - Sorts all hospitals by score (lowest wins)
+    - Returns the winner + a ranked list of all hospitals
+    - Triggers a mock ambulance dispatch with unit number, ETA, dispatch ID
+
+  In production:
+    - Hospital database → replace with a real hospital API or Firestore collection
+    - Traffic delay → call Google Maps Distance Matrix API
+    - Ambulance dispatch → call Twilio SMS API or ambulance dispatch system
+
+  FILE: pathfinding.py  ← DELIVERABLE 5
+  ────────────────────────────────────────
+  The "how to get out" brain using A* algorithm.
+
+  What it does:
+    - Has a full graph of the building matching the 3D frontend map exactly
+      (same room names, same [x, y, z] coordinates as DigitalTwin.jsx)
+    - Rooms: Lobby, Kitchen, Restaurant, Security, Utility (ground floor)
+             101-408 (guest rooms on floors 1-4)
+             Corridor_1 to Corridor_4 (hallways)
+             StairA_F0-F4, StairB_F0-F4 (two stairwells)
+             Lift_F0-F4 (elevator)
+             Main_Exit (the goal)
+    - Given a start room and a list of blocked/hazardous rooms:
+        * Runs A* to find the shortest safe path to Main_Exit
+        * For FIRE / VIOLENCE crises → lifts are automatically disabled
+        * If a safe path is blocked → tries without restrictions as fallback
+    - Returns:
+        * route_nodes: ["408", "Corridor_4", "StairA_F4", ..., "Main_Exit"]
+        * coordinates: [[9,14,4], [0,14,0], [-14,14,0], ..., [0,0,8]]
+          ↑ These are THREE.JS READY [x, y, z] coordinates
+          ↑ Person 2 can pass these directly to the EscapeRoute component
+
+  The coordinates returned EXACTLY MATCH what the frontend already uses.
+  The frontend EscapeRoute component (in DigitalTwin.jsx) draws the green
+  dashed line using these exact coordinates.
+
+
+================================================================================
+  SECTION 3 — ALL API ENDPOINTS
+================================================================================
+
+  BASE URL: http://127.0.0.1:8000
+  DOCS URL: http://127.0.0.1:8000/docs  ← test anything here interactively
+
+  ── Crisis Detection ──────────────────────────────────────────────────────────
+
+  POST /api/crisis/detect       ← General endpoint (manual or any source)
+  POST /api/yolo/detect         ← For Person 1's YOLO camera model
+  POST /api/audio/detect        ← For Person 1's audio (YAMNet) model
+
+  Request body for all three (same format):
+    {
+      "source": "Camera-01",
+      "location": "Kitchen",       ← room name from the building map
+      "severity": 4,               ← integer 1-5
+      "description": "Smoke detected near electrical panel"
+    }
+
+  What happens automatically:
+    → Rule engine assigns staff + sends FCM push
+    → Triage picks best hospital (if severity >= 3)
+    → WebSocket broadcasts to all connected dashboards
+    → Everything saved to Firebase Firestore
+
+  ── Hospital Triage ───────────────────────────────────────────────────────────
+
+  POST /api/triage
+  Request body:
+    {
+      "source": "any",
+      "location": "Main Hall",
+      "severity": 5,
+      "description": "Person unconscious"
+    }
+
+  Returns: best hospital, ranked list of all hospitals, ambulance dispatch info
+
+  ── Pathfinding (A*) ──────────────────────────────────────────────────────────
+
+  POST /api/route
+  Request body:
+    {
+      "start_room": "408",
+      "hazard_rooms": ["Kitchen", "Corridor_1"],
+      "crisis_type": "FIRE",
+      "goal": "Main_Exit"           ← optional, defaults to Main_Exit
+    }
+
+  Returns:
+    {
+      "found": true,
+      "route_nodes": ["408", "Corridor_4", "StairA_F4", ..., "Main_Exit"],
+      "coordinates": [[9,14,4], [0,14,0], ...],   ← THREE.JS READY
+      "distance": 56.41,
+      "lift_used": false,
+      "blocked_zones": ["Kitchen", "Corridor_1"]
+    }
+
+  Crisis types: "FIRE" | "MEDICAL" | "VIOLENCE" | "GAS" | "GENERAL"
+
+  ── Staff Management ──────────────────────────────────────────────────────────
+
+  POST /api/staff           ← Add a staff member to Firebase
+  GET  /api/staff           ← List all staff + their current status
+  POST /api/staff/reset     ← Reset all staff to "Available" (use after testing)
+
+  Staff object fields:
+    name              (string)  - Full name
+    role              (string)  - Security | Medical | Fire Warden | Manager |
+                                  First Responder | Nurse | Doctor
+    medical_training  (string)  - None | Basic | Advanced
+    current_zone      (string)  - Room name from building map e.g. "Lobby"
+    status            (string)  - Available | Busy | Off Duty
+    latitude          (float)   - GPS latitude (optional)
+    longitude         (float)   - GPS longitude (optional)
+    fcm_token         (string)  - Firebase push token from their phone (optional)
+    experience_years  (int)     - Used as tiebreaker in staff scoring (optional)
+
+  ── Active Crises ─────────────────────────────────────────────────────────────
+
+  GET /api/crisis/active    ← Returns all active crises from Redis cache
+
+  ── Simulator ─────────────────────────────────────────────────────────────────
+
+  POST /api/simulator/trigger
+  Request body:
+    {
+      "event_type": "fire",
+      "location": "Kitchen",
+      "severity": 4,
+      "details": "Simulation test"
+    }
+  → Broadcasts SIMULATOR_TRIGGERED event via WebSocket to dashboard
+
+  ── WebSocket ─────────────────────────────────────────────────────────────────
+
+  Connect to: ws://127.0.0.1:8000/ws/dashboard
+
+  Events you will receive:
+    { "event": "NEW_CRISIS",          "data": { crisis object } }
+    { "event": "SIMULATOR_TRIGGERED", "data": { event object } }
+
+  The frontend (crisis-app/src/App.jsx line 353) is ALREADY connected to this.
+
+
+================================================================================
+  SECTION 4 — WHAT IS MOCKED (AND HOW TO MAKE IT REAL)
+================================================================================
+
+  1. FCM PUSH NOTIFICATIONS
+     Currently:  Prints mock notification to the server console
+     Status:     WAITING ON PERSON 4 for the FCM server key
+     To fix:     Set environment variable PANIC_FCM_SERVER_KEY = "their key"
+                 No code changes needed. It auto-switches to real mode.
+     Where:      rule_engine.py lines 13-14 (FCM_SERVER_KEY check)
+
+  2. AMBULANCE DISPATCH
+     Currently:  Prints mock dispatch to console with fake unit number + ETA
+     Status:     Intentionally mocked per project spec
+     To make real: Replace _dispatch_ambulance() in triage.py with a
+                   Twilio SMS call or real ambulance dispatch API call
+     Where:      triage.py → _dispatch_ambulance() function (~line 130)
+
+  3. EMERGENCY SERVICES (911 / POLICE / FIRE DEPT)
+     Currently:  Prints mock escalation to console
+     Status:     Intentionally mocked per project spec
+     To make real: Replace _escalate_to_authorities() with Twilio/SMS
+     Where:      rule_engine.py → _escalate_to_authorities() (~line 320)
+
+  4. HOSPITAL DATABASE
+     Currently:  5 hardcoded mock hospitals in Bangalore
+     Status:     Works for demo/testing
+     To make real: Pull from a hospital API or a Firestore "hospitals" collection
+     Where:      triage.py → HOSPITALS list (~line 30)
+
+  5. TRAFFIC DATA
+     Currently:  Calculated from distance + random congestion seed
+     Status:     Consistent enough for demo (same hospital = same delay)
+     To make real: Call Google Maps Distance Matrix API
+     Where:      triage.py → _get_traffic_delay_minutes() (~line 90)
+
+  6. REDIS
+     Currently:  fakeredis (in-memory, no install needed)
+     Status:     Works perfectly for development
+     To make real: Install Redis + update database.py to use real aioredis
+     Where:      database.py line 21-22
+
+
+================================================================================
+  SECTION 5 — WHAT EACH TEAM MEMBER NEEDS TO KNOW
+================================================================================
+
+  ── PERSON 1 (Camera AI / Audio AI) ──────────────────────────────────────────
+
+  Send POST requests to either:
+    http://127.0.0.1:8000/api/yolo/detect     ← for camera/YOLO detections
+    http://127.0.0.1:8000/api/audio/detect    ← for audio/YAMNet detections
+
+  JSON body (exactly this format):
+    {
+      "source": "Camera-01",          ← which camera/mic it came from
+      "location": "Kitchen",          ← room name (see building map)
+      "severity": 4,                  ← 1 (minor) to 5 (critical)
+      "description": "Smoke detected near electrical panel, possible fire"
+    }
+
+  For best rule engine results, include keywords in the description:
+    Fire/smoke    → include "fire" or "smoke"
+    Medical       → include "medical", "fall", "unconscious", "help"
+    Violence      → include "weapon", "violence", "knife", "gun"
+
+  ── PERSON 2 (Frontend / Dashboard / WebSocket Testing) ──────────────────────
+
+  WebSocket endpoint:
+    ws://127.0.0.1:8000/ws/dashboard
+
+  The frontend (App.jsx) is ALREADY connected. When a crisis fires:
+    - The 3D map auto-highlights the room
+    - Staff markers start moving
+
+  For evacuation route rendering:
+    Call POST /api/route and pass the "coordinates" array to the
+    EscapeRoute component in DigitalTwin.jsx. The format is already
+    [[x, y, z], [x, y, z], ...] which EscapeRoute accepts directly.
+
+  Example:
+    fetch('http://127.0.0.1:8000/api/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        start_room: 'Kitchen',
+        hazard_rooms: ['Kitchen'],
+        crisis_type: 'FIRE'
+      })
+    })
+    .then(r => r.json())
+    .then(data => setActiveRoute(data.route_nodes))
+    // route_nodes is exactly what EscapeRoute's pathNodes prop expects
+
+  ── PERSON 4 (FCM Push Notifications) ────────────────────────────────────────
+
+  Just hand over the FCM server key (from Firebase Console → Project Settings
+  → Cloud Messaging → Server key).
+
+  Set it as an environment variable before running:
+    Windows: $env:PANIC_FCM_SERVER_KEY = "your-server-key"
+    Linux:   export PANIC_FCM_SERVER_KEY="your-server-key"
+
+  No code changes needed. Everything else is already wired up.
+
+  Staff need to have their FCM device token stored in Firebase.
+  When adding a staff member (POST /api/staff), include:
+    "fcm_token": "their-device-fcm-token"
+
+
+================================================================================
+  SECTION 6 — FILE MAP (what each file does)
+================================================================================
+
+  backend/
+  ├── main.py            ← FastAPI app + all API endpoints + WebSocket server
+  ├── rule_engine.py     ← Staff assignment, threat matrix, FCM push, escalation
+  ├── triage.py          ← Hospital scoring, ambulance dispatch
+  ├── pathfinding.py     ← A* algorithm, building graph, evacuation routes
+  ├── database.py        ← Firebase Firestore + FakeRedis connection setup
+  ├── models.py          ← Staff data model (Pydantic schema)
+  ├── requirements.txt   ← Python packages (fastapi, uvicorn, firebase-admin, etc.)
+  ├── Dockerfile         ← How to build this backend into a Docker container
+  ├── test_rule_engine.py← Run this to test all rule engine functionality
+  └── NOTES.txt          ← This file
+
+  project root/
+  ├── docker-compose.yml ← Run the whole app (backend + frontend) with Docker
+  └── README.md          ← Full API documentation for all team members
+
+
+================================================================================
+  SECTION 7 — QUICK HEALTH CHECK
+================================================================================
+
+  With the backend running, open a new terminal and run:
+
+    python test_rule_engine.py
+
+  Expected output (if everything is working):
+    STEP 1: 3 staff members added to Firebase     → check Firebase console
+    STEP 2: Fire crisis triggered                 → Assigned To: [name]
+    STEP 3: Active crises listed                  → 1 active
+    STEP 4: Staff status shows BUSY               → red markers
+    STEP 5: Medical crisis triggered              → Assigned To: [name]
+    STEP 6: All staff reset to Available          → ready for next test
+
+  If "Assigned To" shows NONE:
+    → No staff in Firebase yet. Run step 1 first or add via POST /api/staff
+    → Check server console for Firebase errors
+
+================================================================================
+  SECTION 8 — GUARDIAN MESH CONFIDENCE CALCULATOR  ← DELIVERABLE 6
+================================================================================
+
+  FILE: guardian_mesh.py
+  ──────────────────────
+  The "how sure are we this is real?" brain.
+
+  What it does:
+    - Fuses four independent sensor signals into ONE confidence score [0.0 – 1.0]:
+        * Visual  (35%) — YOLO bounding-box detection confidence + keywords
+        * Acoustic(30%) — YAMNet sound classification confidence + keywords
+        * Motion  (20%) — Fallen-person flag + crowd-surge ratio from camera
+        * Network (15%) — Alert burst frequency in last 60 seconds
+    - Labels the threat level: CALM / LOW / MODERATE / HIGH / CRITICAL
+    - Sets trigger_emergency = True when score ≥ 0.65
+    - Identifies the dominant threat type (FIRE / MEDICAL / VIOLENCE / etc.)
+    - Returns a plain dict — no ML libraries needed, pure math
+
+  Called automatically:
+    - Every time ANY sensor POSTs to /api/yolo/detect, /api/audio/detect,
+      or /api/crisis/detect, fuse_from_crisis() runs automatically and
+      the result is:
+        * Stored in the crisis document (confidence_score, trigger_emergency, threat_level)
+        * Returned in the API response under the "guardian" key
+        * Broadcast via WebSocket in { event: "NEW_CRISIS", guardian: {...} }
+
+  Dedicated endpoint:
+    POST /api/guardian/fuse
+    Body:
+      {
+        "visual":   { "confidence": 0.92, "description": "fire", "severity": 4 },
+        "acoustic": { "confidence": 0.88, "description": "smoke", "severity": 4 },
+        "motion":   { "fallen_detected": false, "crowd_surge": false, "person_count": 2 },
+        "record_network_event": true
+      }
+
+    YOLO detector and Audio detector both POST to this endpoint automatically
+    on every detection, passing raw model confidence + motion data.
+
+  New WebSocket event:
+    { "event": "GUARDIAN_EMERGENCY", "data": { guardian result } }
+    → Fired when /api/guardian/fuse is called directly AND score ≥ 0.65.
+      The frontend can use this to update the threat-level badge independently.
+
+  Output shape:
+    {
+      "confidence_score":  0.87,
+      "trigger_emergency": true,
+      "threat_level":      "CRITICAL",
+      "signal_breakdown":  { "visual": 0.90, "acoustic": 0.85, "motion": 0.70, "network": 0.60 },
+      "dominant_threat":   "FIRE",
+      "recommendation":    "Activate fire suppression; evacuate via safest route; alert fire dept",
+      "timestamp":         "2026-04-27T05:12:00Z"
+    }
+
+  Tuning:
+    - Weights      → WEIGHTS dict at the top of guardian_mesh.py
+    - Threshold    → EMERGENCY_THRESHOLD (default 0.65)
+    - Keyword map  → KEYWORD_CONFIDENCE dict (keyword → confidence boost)
+    - Network win  → NETWORK_WINDOW_SECONDS / MAX_ALERTS_IN_WINDOW
+
+================================================================================
+  END OF NOTES
+================================================================================
